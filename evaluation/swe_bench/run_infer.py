@@ -10,6 +10,7 @@ from datasets import load_dataset
 
 import agenthub
 from evaluation.swe_bench.swe_env_box import SWEBenchSSHBox
+from evaluation.swe_bench.terminal_handler import TerminalHandler
 from evaluation.utils.shared import (
     EvalMetadata,
     codeact_user_response,
@@ -41,6 +42,8 @@ AGENT_CLS_TO_INST_SUFFIX = {
 
 def get_test_result(instance, sandbox, workspace_dir_name):
     test_result = {'result': {}, 'metadata': {}}
+    terminal_handler = TerminalHandler(timeout=60)  # Set a 60-second timeout
+
     # NOTE: if you need to do something in the sandbox to get the correctness metric, modify this function
     try:
         test_patch_parsed = whatthepatch.parse_patch(instance.test_patch)
@@ -62,14 +65,14 @@ def get_test_result(instance, sandbox, workspace_dir_name):
         involved_filepaths = []
 
     # Try to revert the changes for involved filepaths
-    err_code, output = sandbox.execute(f'cd /workspace/{workspace_dir_name}')
+    output, error, timed_out = terminal_handler.execute_command(f'cd /workspace/{workspace_dir_name}')
     test_result['metadata']['2_revert_test_involved_filepaths_success'] = []
     for filepath in involved_filepaths:
-        err_code, output = sandbox.execute(
+        output, error, timed_out = terminal_handler.execute_command(
             f'git checkout {instance["base_commit"]} -- {filepath}'
         )
-        if err_code != 0:
-            logger.error(f'Error reverting changes for {filepath}: {output}')
+        if timed_out or error:
+            logger.error(f'Error reverting changes for {filepath}: {error}')
             test_result['metadata']['2_revert_test_involved_filepaths_success'].append(
                 False
             )
@@ -79,46 +82,46 @@ def get_test_result(instance, sandbox, workspace_dir_name):
             )
 
     # Apply the testcase
-    err_code, output = sandbox.execute('git apply $SWE_TASK_DIR/test.patch')
-    if err_code != 0:
-        logger.error(f'Error applying test patch: {output}')
+    output, error, timed_out = terminal_handler.execute_command('git apply $SWE_TASK_DIR/test.patch')
+    if timed_out or error:
+        logger.error(f'Error applying test patch: {error}')
         test_result['metadata']['3_apply_test_patch_success'] = False
-        test_result['metadata']['3_apply_test_patch_error'] = output
+        test_result['metadata']['3_apply_test_patch_error'] = error
     else:
         test_result['metadata']['3_apply_test_patch_success'] = True
 
     # Run the test command
-    err_code, output = sandbox.execute(
+    output, error, timed_out = terminal_handler.execute_command(
         '$TEST_CMD > /workspace/$SWE_INSTANCE_ID.log 2>&1'
     )
-    if err_code != 0:
-        logger.error(f'Error running test command: {output}')
+    if timed_out or error:
+        logger.error(f'Error running test command: {error}')
         test_result['metadata']['4_run_test_command_success'] = False
-        test_result['metadata']['4_run_test_command_error'] = output
+        test_result['metadata']['4_run_test_command_error'] = error
     else:
         test_result['metadata']['4_run_test_command_success'] = True
 
     # Get the test output
-    err_code, output = sandbox.execute('cat /workspace/$SWE_INSTANCE_ID.log')
-    if err_code != 0:
-        logger.error(f'Error getting test output: {output}')
+    output, error, timed_out = terminal_handler.execute_command('cat /workspace/$SWE_INSTANCE_ID.log')
+    if timed_out or error:
+        logger.error(f'Error getting test output: {error}')
         test_result['metadata']['4_get_test_output_success'] = False
-        test_result['metadata']['4_get_test_output_error'] = output
+        test_result['metadata']['4_get_test_output_error'] = error
     else:
         test_result['metadata']['4_get_test_output_success'] = True
         test_result['test_output'] = output
 
     # Reformat instance.json
     # $SWE_TASK_DIR/instance.json is a dict {"XXX": "YYY"}, add a [ before and a ] after
-    err_code, output = sandbox.execute(
+    output, error, timed_out = terminal_handler.execute_command(
         (
             'cat $SWE_TASK_DIR/instance.json | sed "s/^{/[{/" | sed "s/}$/}]/" > /workspace/instance.json'
         )
     )
-    if err_code != 0:
-        logger.error(f'Error creating instance.json: {output}')
+    if timed_out or error:
+        logger.error(f'Error creating instance.json: {error}')
         test_result['metadata']['5_reformat_instance_json_success'] = False
-        test_result['metadata']['5_reformat_instance_json_error'] = output
+        test_result['metadata']['5_reformat_instance_json_error'] = error
     else:
         test_result['metadata']['5_reformat_instance_json_success'] = True
 
@@ -131,17 +134,17 @@ def get_test_result(instance, sandbox, workspace_dir_name):
 
     else:
         # Get the instance report
-        err_code, output = sandbox.execute(
+        output, error, timed_out = terminal_handler.execute_command(
             (
                 'cd /swe_util/OD-SWE-bench '
                 '&& export PYTHONPATH=$(pwd):$PYTHONPATH '
                 '&& conda run -n swe-bench-eval python swebench/metrics/get_instance_report.py --swe_bench_task /workspace/instance.json --log_path /workspace/$SWE_INSTANCE_ID.log'
             )
         )
-        if err_code != 0:
-            logger.error(f'Error getting instance report: {output}')
+        if timed_out or error:
+            logger.error(f'Error getting instance report: {error}')
             test_result['metadata']['6_get_instance_report_success'] = False
-            test_result['metadata']['6_get_instance_report_error'] = output
+            test_result['metadata']['6_get_instance_report_error'] = error
         else:
             test_result['metadata']['6_get_instance_report_success'] = True
             test_result['result_raw'] = output
